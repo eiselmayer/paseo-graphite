@@ -1,4 +1,4 @@
-import { defineRpc } from "@getpaseo/plugin";
+import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const attentionLevelSchema = z.enum(["action", "ready", "waiting", "done"]);
@@ -76,6 +76,14 @@ export const stackBranchSchema = z.object({
 });
 export type StackBranch = z.infer<typeof stackBranchSchema>;
 
+// Next steps for the author, not something wrong with the PR. Shown in the accent color, not red.
+const TODO_REASONS: ReadonlySet<AttentionReason> = new Set(["submit-required", "publish-required"]);
+
+/** An action item that is only a next step (submit, publish) rather than a problem to fix. */
+export function isTodoOnly(attention: StackBranch["attention"]): boolean {
+  return attention.level === "action" && attention.reasons.every((reason) => TODO_REASONS.has(reason));
+}
+
 export const stackSnapshotSchema = z.object({
   workspaceId: z.string(),
   workspaceName: z.string(),
@@ -118,3 +126,117 @@ export const getStack = defineRpc({
   }),
   output: stackSnapshotSchema,
 });
+
+// Tracks the workspace's current branch, parented on its nearest tracked ancestor.
+// Answers once gt is done; read the stack again with getStack.
+export const trackBranch = defineRpc({
+  name: "graphite.branch.track",
+  input: z.object({ workspaceId: z.string().min(1) }),
+  output: z.object({}),
+});
+
+export const checkoutBranch = defineRpc({
+  name: "graphite.branch.checkout",
+  input: z.object({ workspaceId: z.string().min(1), branch: z.string().min(1) }),
+  output: z.object({}),
+});
+
+const branchRangeSchema = z.object({
+  workspaceId: z.string().min(1),
+  branch: z.string().min(1),
+  parent: z.string().min(1),
+});
+export type BranchRange = z.infer<typeof branchRangeSchema>;
+
+const changedFileSchema = z.object({
+  path: z.string(),
+  oldPath: z.string().nullable(),
+  status: z.enum(["added", "modified", "deleted", "renamed", "copied"]),
+  // Null for binary files.
+  additions: z.number().int().nonnegative().nullable(),
+  deletions: z.number().int().nonnegative().nullable(),
+});
+export type ChangedFile = z.infer<typeof changedFileSchema>;
+
+// Files a branch changes relative to its Graphite parent: the diff its PR shows.
+export const getBranchChanges = defineRpc({
+  name: "graphite.branch.changes",
+  input: branchRangeSchema,
+  output: z.object({ files: z.array(changedFileSchema) }),
+});
+
+const diffLineSchema = z.object({
+  kind: z.enum(["hunk", "add", "delete", "context", "note"]),
+  text: z.string(),
+  oldNumber: z.number().int().nullable(),
+  newNumber: z.number().int().nullable(),
+  // Syntax-colored pieces of `text`; null when the language is unsupported or the file is too large.
+  tokens: z.array(z.object({ text: z.string(), color: z.string().nullable() })).nullable(),
+});
+export type DiffLine = z.infer<typeof diffLineSchema>;
+
+export const getFileDiff = defineRpc({
+  name: "graphite.branch.file-diff",
+  input: branchRangeSchema.extend({
+    path: z.string().min(1),
+    oldPath: z.string().nullable(),
+    // Paseo's syntax theme (its appearance setting) and the light or dark variant of it.
+    syntaxTheme: z.string(),
+    scheme: z.enum(["light", "dark"]),
+  }),
+  output: z.object({ lines: z.array(diffLineSchema) }),
+});
+
+export const projectModeSchema = z.enum(["auto", "on", "off"]);
+export type ProjectMode = z.infer<typeof projectModeSchema>;
+
+// Per-project override of Graphite detection, keyed by Paseo project ID. Unlisted projects are "auto".
+export const graphiteSettings = defineSettings({
+  id: "graphite",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    projects: z.record(z.string(), z.enum(["on", "off"])).default({}),
+  }),
+});
+
+export const getWorkspaceEnabled = defineRpc({
+  name: "graphite.workspace.enabled",
+  input: z.object({ workspaceId: z.string().min(1) }),
+  output: z.object({ enabled: z.boolean() }),
+});
+
+export const listProjects = defineRpc({
+  name: "graphite.projects.list",
+  input: z.object({}),
+  output: z.object({
+    projects: z.array(
+      z.object({
+        projectId: z.string(),
+        name: z.string(),
+        rootPath: z.string(),
+        detected: z.boolean(),
+        mode: projectModeSchema,
+      }),
+    ),
+  }),
+});
+
+export function countProblems(snapshot: StackSnapshot): number {
+  return snapshot.branches.filter(
+    (branch) => branch.attention.level === "action" && !isTodoOnly(branch.attention),
+  ).length;
+}
+
+// Problems Fix All hands to an agent: review feedback and failing required checks.
+const FIXABLE_REASONS: ReadonlySet<AttentionReason> = new Set([
+  "review-comments",
+  "changes-requested",
+  "checks-failed",
+]);
+
+export function fixableBranches(snapshot: StackSnapshot): StackBranch[] {
+  return snapshot.branches.filter((branch) =>
+    branch.attention.reasons.some((reason) => FIXABLE_REASONS.has(reason)),
+  );
+}

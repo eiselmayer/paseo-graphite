@@ -1,5 +1,5 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import type { StackSnapshot } from "../shared/contracts";
+import { fixableBranches, type StackSnapshot } from "../shared/contracts";
 
 type PaseoApi = PluginClientContext["paseo"];
 type PaseoAgent = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"];
@@ -9,45 +9,27 @@ function providerSelection(agent: PaseoAgent): string {
   return `${agent.provider}/${agent.model}`;
 }
 
+// The /fix-pr skill owns the workflow, including never submitting without approval.
+// The prompt only adds which PRs prompted the run; the skill treats that as a hint.
 export function buildFixAllPrompt(snapshot: StackSnapshot): string {
-  const actionable = snapshot.branches.filter((branch) => branch.attention.level === "action");
-  const hasReviewFeedback = actionable.some((branch) =>
-    branch.attention.reasons.some(
-      (reason) => reason === "review-comments" || reason === "changes-requested",
-    ),
-  );
-  const lines = hasReviewFeedback
-    ? [
-        "/fix-pr",
-        "",
-        "Use the existing /fix-pr workflow first for the code-review feedback, then continue with the remaining stack issues below.",
-      ]
-    : ["Fix every actionable issue in this Graphite PR stack."];
-
-  lines.push(
+  const lines = [
+    "/fix-pr",
+    "",
+    "Fix All context: PRs with review feedback or failing checks when the button was pressed.",
     "",
     `Workspace: ${snapshot.workspaceName}`,
     `Repository: ${snapshot.repository ? `${snapshot.repository.owner}/${snapshot.repository.name}` : snapshot.directory}`,
     "",
-    "Actionable PRs:",
-  );
-  for (const branch of actionable) {
+  ];
+  for (const branch of fixableBranches(snapshot)) {
     const identity = branch.pr ? `PR #${branch.pr.number}: ${branch.pr.title}` : branch.branch;
     lines.push(`- ${identity}`);
     lines.push(`  Graphite branch: ${branch.branch}`);
-    lines.push(`  Graphite parent: ${branch.parent ?? snapshot.trunk ?? "unknown"}`);
-    lines.push(`  Issues: ${branch.attention.reasons.join(", ") || branch.attention.label}`);
+    lines.push(`  Issues: ${branch.attention.reasons.join(", ")}`);
     if (branch.pr?.checks.requiredFailingNames.length) {
       lines.push(`  Failing required checks: ${branch.pr.checks.requiredFailingNames.join(", ")}`);
     }
-    if (branch.graphiteUrl) lines.push(`  Graphite: ${branch.graphiteUrl}`);
   }
-  lines.push(
-    "",
-    "Treat `gt log short --stack` and `gt info` as authoritative for stack membership and parentage; do not infer the Graphite stack from GitHub base branches.",
-    "Resolve review feedback, failing checks, and merge conflicts; run focused verification; then update the affected PRs through the normal Graphite workflow.",
-    "Do not merge any PR. Report what changed, what was submitted, and anything still blocked.",
-  );
   return lines.join("\n");
 }
 
@@ -56,7 +38,8 @@ export async function dispatchFixAll(
   workspaceId: string,
   snapshot: StackSnapshot,
 ) {
-  if (snapshot.summary.action === 0) throw new Error("This stack has no actionable issues.");
+  const fixable = fixableBranches(snapshot).length;
+  if (fixable === 0) throw new Error("This stack has no review feedback or failing checks to fix.");
 
   const listed = await paseo.agents.list({
     filter: { includeArchived: false },
@@ -81,7 +64,7 @@ export async function dispatchFixAll(
 
   const agent = await paseo.workspaces.ref(workspaceId).agents.create({
     config,
-    title: `Fix Graphite stack (${snapshot.summary.action})`,
+    title: `Fix Graphite stack (${fixable})`,
     labels: {
       "paseo-graphite": "fix-all",
       "paseo-graphite-workspace": workspaceId,

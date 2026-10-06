@@ -3,15 +3,30 @@ import type {
   PluginClientContext,
 } from "@getpaseo/plugin/client";
 import { GraphitePrCenter } from "./client/center";
+import { GraphiteDiffPanel } from "./client/diff-panel";
+import { setDiffPanelOpener } from "./client/diff-store";
+import { onEnablementChanged } from "./client/enablement";
 import { GraphiteStackPanel } from "./client/panel";
+import { ProjectSettings } from "./client/settings";
 import {
   buttonLabel,
   buttonTitle,
   StackStatusIcon,
   subscribeStack,
 } from "./client/status";
+import { getWorkspaceEnabled } from "./shared/contracts";
+
+// Picks up repositories that start or stop using Graphite without a settings change.
+const ENABLEMENT_RECHECK_MS = 5 * 60_000;
 
 export default function contribute(client: PluginClientContext) {
+  client.addSettingsScreen({
+    id: "projects",
+    title: "Projects",
+    icon: "FolderGit2",
+    Component: ProjectSettings,
+  });
+
   client.addSurface("graphite-prs", GraphitePrCenter);
   client.addSidebarItem({
     id: "graphite-prs",
@@ -39,6 +54,17 @@ export default function contribute(client: PluginClientContext) {
     locations: ["explorer"],
     Component: GraphiteStackPanel,
   });
+  client.addWorkspacePanel({
+    id: "graphite-diff",
+    title: "Graphite diff",
+    icon: "FileDiff",
+    context: "workspace",
+    locations: ["workspace"],
+    Component: GraphiteDiffPanel,
+  });
+  setDiffPanelOpener((workspaceId) =>
+    client.openPanel("graphite-diff", { workspaceId, location: "workspace" }),
+  );
 
   client.addCommandCenterItem({
     id: "open-graphite-stack",
@@ -68,6 +94,9 @@ export default function contribute(client: PluginClientContext) {
   };
   const headers = new Map<string, RegisteredButton>();
   const pills = new Map<string, RegisteredButton>();
+  const enabled = new Map<string, boolean>();
+  const checks = new Map<string, number>();
+  const agents = new Map<string, { id: string; workspaceId?: string | null; status?: string }>();
   let stopped = false;
 
   function descriptor(workspaceId: string) {
@@ -101,7 +130,9 @@ export default function contribute(client: PluginClientContext) {
   }
 
   function registerPill(agent: { id: string; workspaceId?: string | null; status?: string }) {
+    agents.set(agent.id, agent);
     if (!agent.workspaceId || agent.status === "closed") return;
+    if (!enabled.get(agent.workspaceId)) return removePill(agent.id);
     const agentId = agent.id;
     const workspaceId = agent.workspaceId;
     const existing = pills.get(agentId);
@@ -127,16 +158,49 @@ export default function contribute(client: PluginClientContext) {
     pills.delete(agentId);
   }
 
+  // Buttons and pills appear only in workspaces whose project has Graphite turned on.
+  async function syncWorkspace(workspaceId: string) {
+    const check = (checks.get(workspaceId) ?? 0) + 1;
+    checks.set(workspaceId, check);
+    let isEnabled = false;
+    try {
+      isEnabled = (await client.rpc(getWorkspaceEnabled, { workspaceId })).enabled;
+    } catch (error) {
+      console.error("[paseo-graphite] enablement check failed", error);
+    }
+    if (stopped || checks.get(workspaceId) !== check) return;
+    enabled.set(workspaceId, isEnabled);
+    if (isEnabled) registerHeader(workspaceId);
+    else removeHeader(workspaceId);
+    for (const agent of agents.values()) {
+      if (agent.workspaceId === workspaceId) registerPill(agent);
+    }
+  }
+
+  function forgetWorkspace(workspaceId: string) {
+    enabled.delete(workspaceId);
+    checks.delete(workspaceId);
+    removeHeader(workspaceId);
+  }
+
+  function recheckAll() {
+    for (const workspaceId of enabled.keys()) void syncWorkspace(workspaceId);
+  }
+  const unsubscribeEnablement = onEnablementChanged(recheckAll);
+  const recheckTimer = setInterval(recheckAll, ENABLEMENT_RECHECK_MS);
+
   const unsubscribeWorkspaces = client.paseo.workspaces.subscribe((update) => {
     if (stopped) return;
-    if (update.kind === "remove") removeHeader(update.id);
-    else registerHeader(update.workspace.id);
+    if (update.kind === "remove") forgetWorkspace(update.id);
+    else if (!checks.has(update.workspace.id)) void syncWorkspace(update.workspace.id);
   });
   void client.paseo.workspaces
     .list()
     .then(({ entries }) => {
       if (stopped) return;
-      for (const workspace of entries) registerHeader(workspace.id);
+      for (const workspace of entries) {
+        if (!checks.has(workspace.id)) void syncWorkspace(workspace.id);
+      }
     })
     .catch((error) => {
       if (!stopped) console.error("[paseo-graphite] workspace observation failed", error);
@@ -144,8 +208,10 @@ export default function contribute(client: PluginClientContext) {
 
   const unsubscribeAgents = client.paseo.agents.subscribe((update) => {
     if (stopped) return;
-    if (update.kind === "remove") removePill(update.agentId);
-    else registerPill(update.agent);
+    if (update.kind === "remove") {
+      agents.delete(update.agentId);
+      removePill(update.agentId);
+    } else registerPill(update.agent);
   });
   void client.paseo.agents
     .list()
@@ -159,6 +225,9 @@ export default function contribute(client: PluginClientContext) {
 
   return () => {
     stopped = true;
+    setDiffPanelOpener(null);
+    clearInterval(recheckTimer);
+    unsubscribeEnablement();
     unsubscribeWorkspaces();
     unsubscribeAgents();
     for (const id of [...headers.keys()]) removeHeader(id);

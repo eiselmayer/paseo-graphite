@@ -107,7 +107,7 @@ function bool(value: unknown): boolean {
   return value === true;
 }
 
-function emptySnapshot(input: {
+export function emptySnapshot(input: {
   workspaceId: string;
   workspaceName: string;
   directory: string;
@@ -466,7 +466,7 @@ async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnaps
         message: untracked
           ? `${currentBranch} is not tracked by Graphite.`
           : "Graphite could not read a stack for this workspace.",
-        hint: untracked ? "Run gt track with the correct Graphite parent." : detail.trim().split(/\r?\n/)[0] || null,
+        hint: untracked ? "Tracking stacks it on its nearest tracked ancestor." : detail.trim().split(/\r?\n/)[0] || null,
       }),
       trunk,
       repository,
@@ -632,6 +632,16 @@ async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnaps
   };
 }
 
+// Bumped by invalidateStack so an inspection that started earlier does not cache its stale result.
+const generations = new Map<string, number>();
+
+/** Drops the cached and in-flight stack after a command changed the repository. */
+export function invalidateStack(workspaceId: string): void {
+  cache.delete(workspaceId);
+  inFlight.delete(workspaceId);
+  generations.set(workspaceId, (generations.get(workspaceId) ?? 0) + 1);
+}
+
 export async function inspectWorkspaceStack(
   paseo: PaseoApi,
   workspaceId: string,
@@ -641,8 +651,10 @@ export async function inspectWorkspaceStack(
   if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
   const running = inFlight.get(workspaceId);
   if (running) return running;
+  const generation = generations.get(workspaceId) ?? 0;
   const request = enqueueInspection(() => inspect(paseo, workspaceId))
     .then((value) => {
+      if ((generations.get(workspaceId) ?? 0) !== generation) return value;
       const now = Date.now();
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);

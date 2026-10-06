@@ -6,11 +6,19 @@ import {
 } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
-import { getStack } from "../shared/contracts";
+import {
+  checkoutBranch,
+  countProblems,
+  fixableBranches,
+  getStack,
+  trackBranch,
+} from "../shared/contracts";
+import { BranchChanges } from "./branch-changes";
 import { dispatchFixAll } from "./fix-all";
 import { CompactPrRow } from "./pr-row";
+import { withTimeout } from "./timeout";
 import { publishStack, stackQueryKey } from "./status";
 
 function Count({
@@ -31,6 +39,9 @@ function Count({
     </View>
   );
 }
+
+// The server gives gt 30 seconds; this leaves room for the round trip.
+const GT_TIMEOUT_MS = 45_000;
 
 export function GraphiteStackPanel({
   theme,
@@ -54,6 +65,39 @@ export function GraphiteStackPanel({
     onSuccess(data) {
       queryClient.setQueryData(stackQueryKey(workspaceId), data);
       publishStack(data);
+    },
+  });
+  // Commands answer once gt is done; the server drops its cached stack, so a plain refetch reads it fresh.
+  const reloadStack = () => queryClient.invalidateQueries({ queryKey: stackQueryKey(workspaceId) });
+  const trackCurrent = useRpc(trackBranch);
+  const track = useMutation({
+    mutationFn: () =>
+      withTimeout(trackCurrent({ workspaceId }), GT_TIMEOUT_MS, "gt track did not answer. Refresh to see if it worked."),
+    onSuccess() {
+      toast.show("Branch tracked with Graphite", { variant: "success" });
+      void reloadStack();
+    },
+    onError(error) {
+      toast.error(error instanceof Error ? error.message : "Could not track the branch.");
+    },
+  });
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const toggleExpanded = (branch: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(branch)) next.add(branch);
+      return next;
+    });
+  const checkoutRpc = useRpc(checkoutBranch);
+  const checkout = useMutation({
+    mutationFn: (branch: string) =>
+      withTimeout(checkoutRpc({ workspaceId, branch }), GT_TIMEOUT_MS, "gt checkout did not answer. Refresh to see if it worked."),
+    onSuccess(_data, branch) {
+      toast.show(`Checked out ${branch}`, { variant: "success" });
+      void reloadStack();
+    },
+    onError(error) {
+      toast.error(error instanceof Error ? error.message : "Could not check out the branch.");
     },
   });
   const fixAll = useMutation({
@@ -104,8 +148,12 @@ export function GraphiteStackPanel({
   }
 
   const snapshot = query.data!;
+  const tracking = track.isPending || (track.isSuccess && query.isFetching);
+  const problems = countProblems(snapshot);
+  const fixable = fixableBranches(snapshot).length;
+  const needYouColor = problems ? theme.colors.statusDanger : theme.colors.accent;
   const summaryColor = snapshot.summary.action
-    ? theme.colors.statusDanger
+    ? needYouColor
     : snapshot.summary.ready
       ? theme.colors.statusSuccess
       : snapshot.summary.waiting
@@ -120,10 +168,10 @@ export function GraphiteStackPanel({
           <Text style={styles.title}>Graphite stack</Text>
           <Text numberOfLines={1} style={styles.detail}>{workspace?.name ?? snapshot.workspaceName}</Text>
         </View>
-        {snapshot.available && snapshot.summary.action > 0 ? (
+        {snapshot.available && fixable > 0 ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Fix all ${snapshot.summary.action} actionable pull requests with a new agent`}
+            accessibilityLabel={`Fix review feedback and failing checks on ${fixable} pull ${fixable === 1 ? "request" : "requests"} with a new agent`}
             disabled={fixAll.isPending}
             onPress={() => fixAll.mutate()}
             style={{
@@ -164,11 +212,40 @@ export function GraphiteStackPanel({
             {snapshot.unavailable?.message ?? "No Graphite stack found"}
           </Text>
           {snapshot.unavailable?.hint ? <Text style={styles.detail}>{snapshot.unavailable.hint}</Text> : null}
+          {snapshot.unavailable?.kind === "untracked" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Track ${snapshot.currentBranch ?? "this branch"} with Graphite`}
+              disabled={tracking}
+              onPress={() => track.mutate()}
+              style={{
+                alignSelf: "flex-start",
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 5,
+                marginTop: 4,
+                paddingHorizontal: 9,
+                paddingVertical: 7,
+                borderRadius: 8,
+                backgroundColor: theme.colors.accent,
+                opacity: tracking ? 0.65 : 1,
+              }}
+            >
+              {tracking ? (
+                <ActivityIndicator size="small" color={theme.colors.accentForeground} />
+              ) : (
+                <Icon name="GitBranchPlus" size={14} color={theme.colors.accentForeground} />
+              )}
+              <Text style={{ color: theme.colors.accentForeground, fontSize: 12, fontWeight: "700" }}>
+                {track.isSuccess && query.isFetching ? "Reading stack…" : "Track with Graphite"}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : (
         <>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12, paddingHorizontal: 2 }}>
-            <Count label="need you" value={snapshot.summary.action} color={theme.colors.statusDanger} theme={theme} />
+            <Count label="need you" value={snapshot.summary.action} color={needYouColor} theme={theme} />
             <Count label="ready" value={snapshot.summary.ready} color={theme.colors.statusSuccess} theme={theme} />
             <Count label="waiting" value={snapshot.summary.waiting} color={theme.colors.statusWarning} theme={theme} />
             <Count label="done" value={snapshot.summary.done} color={theme.colors.foregroundMuted} theme={theme} />
@@ -180,7 +257,26 @@ export function GraphiteStackPanel({
           ) : null}
           <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 10, overflow: "hidden" }}>
             {snapshot.branches.map((branch) => (
-              <CompactPrRow key={branch.branch} branch={branch} theme={theme} />
+              <CompactPrRow
+                key={branch.branch}
+                branch={branch}
+                theme={theme}
+                onCheckout={() => {
+                  if (!checkout.isPending) checkout.mutate(branch.branch);
+                }}
+                checkingOut={checkout.isPending && checkout.variables === branch.branch}
+                expanded={expanded.has(branch.branch)}
+                onToggleExpanded={branch.parent ? () => toggleExpanded(branch.branch) : undefined}
+              >
+                {branch.parent ? (
+                  <BranchChanges
+                    workspaceId={workspaceId}
+                    branch={branch.branch}
+                    parent={branch.parent}
+                    theme={theme}
+                  />
+                ) : null}
+              </CompactPrRow>
             ))}
           </View>
         </>

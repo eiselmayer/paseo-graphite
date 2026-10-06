@@ -6,7 +6,7 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { View } from "react-native";
-import { getStack, type StackSnapshot } from "../shared/contracts";
+import { countProblems, getStack, type StackSnapshot } from "../shared/contracts";
 
 type Listener = (snapshot: StackSnapshot) => void;
 
@@ -58,7 +58,8 @@ export function StackStatusIcon({ workspaceId, size, color, theme }: PluginButto
   }, [query.data]);
 
   let tint = color;
-  if (query.isError || query.data?.summary.action) tint = theme.colors.statusDanger;
+  if (query.isError || (query.data && countProblems(query.data))) tint = theme.colors.statusDanger;
+  else if (query.data?.summary.action) tint = theme.colors.accent;
   else if (query.data?.summary.ready) tint = theme.colors.statusSuccess;
   else if (query.data?.summary.waiting) tint = theme.colors.statusWarning;
   else if (query.data && !query.data.available) tint = theme.colors.foregroundMuted;
