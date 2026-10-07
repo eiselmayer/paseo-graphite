@@ -9,6 +9,8 @@ export interface Comment {
   workspaceId: string;
   agentId: string;
   agentTitle: string;
+  /** What waits, for the banner while the agent works: "Comments", "Fix All". */
+  what: string;
   text: string;
   attachments: CommentAttachment[];
 }

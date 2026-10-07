@@ -75,6 +75,7 @@ export async function sendWaitingComments(
       workspaceId: comments[0].workspaceId,
       agentId,
       agentTitle,
+      what: "Comments",
       text: commentsMessage(comments),
       attachments: comments.map((comment) => ({
         type: "text",

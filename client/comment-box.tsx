@@ -180,7 +180,7 @@ export function CommentBox({
   );
 }
 
-function MenuRow({
+export function MenuRow({
   theme,
   label,
   active = false,

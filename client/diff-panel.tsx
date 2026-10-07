@@ -423,11 +423,11 @@ export function GraphiteDiffPanel({ theme, workspaceId, host }: PluginWorkspaceP
         >
           <Icon name="Clock" size={14} color={theme.colors.foregroundMuted} />
           <Text numberOfLines={1} style={[muted, { flex: 1 }]}>
-            Comments wait for {item.agentTitle} to finish
+            {item.what} queued for {item.agentTitle}, sent when it finishes
           </Text>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Cancel the comment for ${item.agentTitle}`}
+            accessibilityLabel={`Cancel the queued ${item.what} for ${item.agentTitle}`}
             hitSlop={8}
             onPress={() => cancelQueued(item.id)}
           >

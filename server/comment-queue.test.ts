@@ -7,6 +7,7 @@ const comment = (agentId: string, text: string) => ({
   workspaceId: "workspace",
   agentId,
   agentTitle: "Agent",
+  what: "Comments",
   text,
   attachments: [{ type: "text" as const, mimeType: "text/plain" as const, text: "context" }],
 });

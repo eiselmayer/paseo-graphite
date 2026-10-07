@@ -1,5 +1,6 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { fixableBranches, type StackSnapshot } from "../shared/contracts";
+import { deliverComment } from "./comment-queue";
 
 type PaseoApi = PluginClientContext["paseo"];
 type PaseoAgent = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"];
@@ -33,6 +34,28 @@ export function buildFixAllPrompt(snapshot: StackSnapshot): string {
   return lines.join("\n");
 }
 
+/** Hands Fix All to an existing agent; while it works, the prompt waits instead of interrupting it. */
+export async function sendFixAll(paseo: PaseoApi, workspaceId: string, agentId: string, snapshot: StackSnapshot) {
+  if (fixableBranches(snapshot).length === 0) throw new Error("This stack has no review feedback or failing checks to fix.");
+  const current = await paseo.agents.ref(agentId).refresh();
+  if (!current) throw new Error("That agent is gone. Pick another one.");
+  const agentTitle = current.agent.title?.trim() || "the agent";
+  const outcome = await deliverComment(
+    paseo,
+    {
+      workspaceId,
+      agentId,
+      agentTitle,
+      what: "Fix All",
+      text: buildFixAllPrompt(snapshot),
+      attachments: [],
+    },
+    current.agent.status,
+  );
+  return { outcome, agentTitle };
+}
+
+/** Starts a new agent for Fix All with the latest agent's provider, model and mode. */
 export async function dispatchFixAll(
   paseo: PaseoApi,
   workspaceId: string,

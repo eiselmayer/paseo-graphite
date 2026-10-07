@@ -15,8 +15,10 @@ import {
   getStack,
   trackBranch,
 } from "../shared/contracts";
+import { agentsOnScreen, defaultAgent, trackScreenAgents, workspaceAgents } from "./agent-target";
 import { BranchChanges } from "./branch-changes";
-import { dispatchFixAll } from "./fix-all";
+import { MenuRow } from "./comment-box";
+import { dispatchFixAll, sendFixAll } from "./fix-all";
 import { CompactPrRow } from "./pr-row";
 import { withTimeout } from "./timeout";
 import { publishStack, stackQueryKey } from "./status";
@@ -43,9 +45,13 @@ function Count({
 // The server gives gt 30 seconds; this leaves room for the round trip.
 const GT_TIMEOUT_MS = 45_000;
 
+// Fix All's target when the user picks a fresh agent over an existing session.
+const NEW_AGENT = "new";
+
 export function GraphiteStackPanel({
   theme,
   layout,
+  host,
   workspaceId,
   navigation,
 }: PluginWorkspacePanelProps) {
@@ -100,17 +106,40 @@ export function GraphiteStackPanel({
       toast.error(error instanceof Error ? error.message : "Could not check out the branch.");
     },
   });
+  // Fix All goes to the session picked under its button: by default the one the user was last in.
+  useEffect(trackScreenAgents, []);
+  const [fixTarget, setFixTarget] = useState<string | null>(null);
+  const [choosingTarget, setChoosingTarget] = useState(false);
+  const canFix = Boolean(query.data?.available && fixableBranches(query.data).length > 0);
+  const agentsQuery = useQuery({
+    queryKey: ["paseo-graphite", "agents", workspaceId],
+    queryFn: () => workspaceAgents(paseo, workspaceId),
+    enabled: canFix,
+    staleTime: 5_000,
+  });
+  const agentChoices = (agentsQuery.data ?? []).map((agent) => ({
+    id: agent.id,
+    title: agent.title?.trim() || "Untitled agent",
+  }));
+  const target = fixTarget ?? defaultAgent(agentsQuery.data ?? [], agentsOnScreen(host.id, workspaceId)) ?? NEW_AGENT;
+  const targetTitle =
+    target === NEW_AGENT ? "a new agent" : (agentChoices.find((choice) => choice.id === target)?.title ?? "the agent");
   const fixAll = useMutation({
     mutationFn: async () => {
       if (!query.data) throw new Error("The stack is still loading.");
-      return dispatchFixAll(paseo, workspaceId, query.data);
+      if (target === NEW_AGENT) {
+        return { agentId: await dispatchFixAll(paseo, workspaceId, query.data), outcome: "started" as const, agentTitle: "" };
+      }
+      return { agentId: target, ...(await sendFixAll(paseo, workspaceId, target, query.data)) };
     },
-    onSuccess(agentId) {
-      toast.show("Fix All agent started", { variant: "success" });
+    onSuccess({ agentId, outcome, agentTitle }) {
+      if (outcome === "started") toast.show("Fix All agent started", { variant: "success" });
+      else if (outcome === "sent") toast.show(`Fix All sent to ${agentTitle}`, { variant: "success" });
+      else toast.show(`${agentTitle} is working. Fix All goes out when it finishes.`, { variant: "info" });
       navigation?.openAgent({ agentId });
     },
     onError(error) {
-      toast.error(error instanceof Error ? error.message : "Could not start the Fix All agent.");
+      toast.error(error instanceof Error ? error.message : "Could not run Fix All.");
     },
   });
   useEffect(() => {
@@ -172,7 +201,7 @@ export function GraphiteStackPanel({
         {snapshot.available && fixable > 0 ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Fix review feedback and failing checks on ${fixable} pull ${fixable === 1 ? "request" : "requests"} with a new agent`}
+            accessibilityLabel={`Fix review feedback and failing checks on ${fixable} pull ${fixable === 1 ? "request" : "requests"} in ${targetTitle}`}
             disabled={fixAll.isPending}
             onPress={() => fixAll.mutate()}
             style={{
@@ -206,6 +235,44 @@ export function GraphiteStackPanel({
           <Icon name="RefreshCw" size={15} color={theme.colors.foreground} />
         </Pressable>
       </View>
+      {snapshot.available && fixable > 0 ? (
+        <View style={{ gap: 2 }}>
+          <MenuRow
+            theme={theme}
+            label={`Fix All goes to ${targetTitle}. Choose another session`}
+            active={choosingTarget}
+            onPress={() => setChoosingTarget((open) => !open)}
+            style={{ alignSelf: "flex-end", maxWidth: "100%", gap: 4, minHeight: 24, borderRadius: 8 }}
+          >
+            <Text style={styles.detail}>Sends to</Text>
+            <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foreground, fontSize: 11 }}>
+              {targetTitle}
+            </Text>
+            <Icon name={choosingTarget ? "ChevronUp" : "ChevronDown"} size={12} color={theme.colors.foregroundMuted} />
+          </MenuRow>
+          {choosingTarget
+            ? [...agentChoices, { id: NEW_AGENT, title: "New agent" }].map((choice) => (
+                <MenuRow
+                  key={choice.id}
+                  theme={theme}
+                  label={choice.id === NEW_AGENT ? "Start a new agent for Fix All" : `Send Fix All to ${choice.title}`}
+                  onPress={() => {
+                    setFixTarget(choice.id);
+                    setChoosingTarget(false);
+                  }}
+                  style={{ gap: 8, paddingVertical: 6, borderRadius: 6 }}
+                >
+                  <View style={{ width: 14 }}>
+                    {choice.id === target ? <Icon name="Check" size={14} color={theme.colors.accent} /> : null}
+                  </View>
+                  <Text numberOfLines={1} style={{ flex: 1, color: theme.colors.foreground, fontSize: 12 }}>
+                    {choice.title}
+                  </Text>
+                </MenuRow>
+              ))
+            : null}
+        </View>
+      ) : null}
 
       {!snapshot.available ? (
         <View style={{ padding: 12, borderRadius: 10, gap: 5, backgroundColor: theme.colors.surface1 }}>
