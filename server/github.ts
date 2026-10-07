@@ -16,6 +16,8 @@ export interface GithubPr {
   mergeable: string;
   mergeStateStatus: string;
   reviewDecision: string;
+  // Graphite's "Merge when ready", or GitHub's auto-merge, is on.
+  mergeWhenReady: boolean;
   reviewRequests: string[];
   totalThreads: number;
   resolvedThreads: number;
@@ -70,10 +72,16 @@ function bool(value: unknown): boolean {
   return value === true;
 }
 
+// The label Graphite's merge queue enqueues with. Graphite adds it when "Merge when ready" is
+// turned on and removes it when that is turned off or the PR leaves the queue.
+const MERGE_LABEL = "merge-queue";
+
 const PR_FRAGMENT = `
 fragment pr on PullRequest {
   number title url state isDraft updatedAt headRefName headRefOid baseRefName mergeable mergeStateStatus reviewDecision isCrossRepository
   author{login}
+  autoMergeRequest{enabledAt}
+  labels(first:20){nodes{name}}
   baseRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
   reviewRequests(first:20){nodes{requestedReviewer{... on User{login} ... on Team{slug}}}}
   reviewThreads(first:100){totalCount nodes{isResolved}}
@@ -224,6 +232,7 @@ export function parsePullRequest(pr: JsonObject, viewer: string | null): GithubP
     })
     .filter(Boolean);
   const author = text(object(pr.author)?.login) || null;
+  const labels = array(object(pr.labels)?.nodes).map((label) => text(object(label)?.name));
 
   return {
     number: Number(pr.number),
@@ -238,6 +247,7 @@ export function parsePullRequest(pr: JsonObject, viewer: string | null): GithubP
     mergeable: text(pr.mergeable),
     mergeStateStatus: text(pr.mergeStateStatus),
     reviewDecision: text(pr.reviewDecision),
+    mergeWhenReady: object(pr.autoMergeRequest) !== null || labels.includes(MERGE_LABEL),
     reviewRequests,
     totalThreads,
     resolvedThreads,
@@ -267,7 +277,7 @@ const BATCH_CONCURRENCY = 3;
 // A lock whose process is gone is stale at once. This bounds one whose process id was reused.
 const LOCK_STALE_MS = 5 * 60_000;
 const LOCK_WAIT_MS = 30_000;
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const CACHE_DIR =
   process.env.PASEO_GRAPHITE_CACHE_DIR || join(tmpdir(), `paseo-graphite-${process.getuid?.() ?? "user"}`);
 

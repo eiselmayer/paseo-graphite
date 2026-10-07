@@ -36,6 +36,7 @@ const readyPr: GithubPr = {
   mergeable: "MERGEABLE",
   mergeStateStatus: "CLEAN",
   reviewDecision: "APPROVED",
+  mergeWhenReady: false,
   reviewRequests: [],
   totalThreads: 5,
   resolvedThreads: 5,

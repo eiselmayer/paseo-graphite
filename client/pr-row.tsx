@@ -139,6 +139,15 @@ export function CompactPrRow({
         <Text style={{ color: tint, fontSize: 11, fontWeight: "600" }}>
           {branch.attention.label}
         </Text>
+        {pr?.mergeWhenReady && pr.state === "OPEN" ? (
+          <View
+            accessibilityLabel="Merge when ready is on"
+            style={{ flexDirection: "row", alignItems: "center", gap: 3 }}
+          >
+            <Icon name="GitMerge" size={11} color={theme.colors.accent} />
+            <Text style={{ color: theme.colors.accent, fontSize: 11 }}>Merge when ready</Text>
+          </View>
+        ) : null}
         {pr && pr.totalThreads > 0 ? (
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
             {pr.resolvedThreads}/{pr.totalThreads} comments

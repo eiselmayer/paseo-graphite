@@ -96,6 +96,15 @@ test("a PR found by branch name counts only at one of the branch's commits, and 
   assert.equal(answer([node(13, { headRefOid: "head-two", isCrossRepository: true })])?.prs.get("two"), null);
 });
 
+test("merge when ready is on with Graphite's merge label or GitHub's auto-merge", () => {
+  const mergeWhenReady = (extra: object) =>
+    github.parsePullRequest({ number: 1, state: "OPEN", ...extra }, "me").mergeWhenReady;
+  assert.equal(mergeWhenReady({ labels: { nodes: [{ name: "merge-queue" }] } }), true);
+  assert.equal(mergeWhenReady({ autoMergeRequest: { enabledAt: "2026-10-07T22:10:29Z" } }), true);
+  assert.equal(mergeWhenReady({ labels: { nodes: [{ name: "bug" }] }, autoMergeRequest: null }), false);
+  assert.equal(mergeWhenReady({}), false);
+});
+
 test("a failed part of an answer is left out, an unknown PR number is not, and a failed answer is null", () => {
   const parsed = parseBatch(
     {

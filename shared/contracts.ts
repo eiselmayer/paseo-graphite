@@ -59,6 +59,7 @@ export const stackBranchSchema = z.object({
       mergeable: z.string(),
       mergeStateStatus: z.string(),
       reviewDecision: z.string(),
+      mergeWhenReady: z.boolean(),
       reviewRequests: z.array(z.string()),
       totalThreads: z.number().int().nonnegative(),
       resolvedThreads: z.number().int().nonnegative(),

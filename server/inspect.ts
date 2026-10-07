@@ -354,6 +354,7 @@ async function inspect(paseo: PaseoApi, workspaceId: string, refresh: boolean): 
             mergeable: "UNKNOWN",
             mergeStateStatus: "UNKNOWN",
             reviewDecision: "",
+            mergeWhenReady: false,
             reviewRequests: [],
             totalThreads: 0,
             resolvedThreads: 0,
