@@ -3,6 +3,10 @@ import type {
   PluginClientContext,
 } from "@getpaseo/plugin/client";
 import { GraphitePrCenter } from "./client/center";
+import { addCommentMessages } from "./client/comment-message";
+import { stopCommentQueue } from "./client/comment-queue";
+import { subscribeWaitingComments, waitingComments } from "./client/waiting-comments";
+import { WaitingCommentsPopover } from "./client/waiting-comments-popover";
 import { GraphiteDiffPanel } from "./client/diff-panel";
 import { setDiffPanelOpener } from "./client/diff-store";
 import { onEnablementChanged } from "./client/enablement";
@@ -65,6 +69,46 @@ export default function contribute(client: PluginClientContext) {
   setDiffPanelOpener((workspaceId) =>
     client.openPanel("graphite-diff", { workspaceId, location: "workspace" }),
   );
+  addCommentMessages(client);
+
+  // Comments added in the diff wait on a pill on their agent's chat box until the user sends them.
+  const commentPills = new Map<string, PluginButtonRegistration>();
+  function syncCommentPills() {
+    const waiting = new Map<string, { workspaceId: string; count: number }>();
+    for (const comment of waitingComments()) {
+      const entry = waiting.get(comment.agentId) ?? { workspaceId: comment.workspaceId, count: 0 };
+      entry.count += 1;
+      waiting.set(comment.agentId, entry);
+    }
+    for (const [agentId, pill] of commentPills) {
+      if (waiting.has(agentId)) continue;
+      pill.remove();
+      commentPills.delete(agentId);
+    }
+    for (const [agentId, { workspaceId, count }] of waiting) {
+      const label = count === 1 ? "1 comment" : `${count} comments`;
+      const pill = commentPills.get(agentId);
+      if (pill) pill.update({ label });
+      else {
+        commentPills.set(
+          agentId,
+          client.addComposerPill({
+            id: "waiting-comments",
+            workspaceId,
+            agentId,
+            button: {
+              title: "Diff comments waiting to be sent",
+              icon: "MessageSquareText",
+              label,
+              behavior: { kind: "popover", Content: WaitingCommentsPopover },
+            },
+          }),
+        );
+      }
+    }
+  }
+  syncCommentPills();
+  const unsubscribeWaitingComments = subscribeWaitingComments(syncCommentPills);
 
   client.addCommandCenterItem({
     id: "open-graphite-stack",
@@ -226,6 +270,9 @@ export default function contribute(client: PluginClientContext) {
   return () => {
     stopped = true;
     setDiffPanelOpener(null);
+    stopCommentQueue();
+    unsubscribeWaitingComments();
+    for (const pill of commentPills.values()) pill.remove();
     clearInterval(recheckTimer);
     unsubscribeEnablement();
     unsubscribeWorkspaces();

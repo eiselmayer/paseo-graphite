@@ -184,7 +184,8 @@ export const getFileDiff = defineRpc({
     syntaxTheme: z.string(),
     scheme: z.enum(["light", "dark"]),
   }),
-  output: z.object({ lines: z.array(diffLineSchema) }),
+  // `base` is the merge base the diff starts from, which numbers the deleted lines.
+  output: z.object({ lines: z.array(diffLineSchema), base: z.string() }),
 });
 
 export const projectModeSchema = z.enum(["auto", "on", "off"]);

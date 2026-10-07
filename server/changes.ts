@@ -86,6 +86,17 @@ export function parseChangedFiles(names: string, counts: string): ChangedFile[] 
   return files;
 }
 
+/**
+ * Token colors from the syntax palette. Some styles combine two names, like Markdown's
+ * "heading meta" for `##`, and have no palette entry; they keep the default color, as in Paseo.
+ */
+export function colorTokens(
+  tokens: HighlightToken[] | undefined,
+  palette: ReturnType<typeof resolveSyntaxColors>,
+): { text: string; color: string | null }[] | null {
+  return tokens?.map((token) => ({ text: token.text, color: (token.style && palette[token.style]) || null })) ?? null;
+}
+
 // Same limits as Paseo's own diff highlighting: past these, lezer gets slow.
 const MAX_HIGHLIGHT_BYTES = 1024 * 1024;
 const MAX_HIGHLIGHT_LINE_CHARS = 10_000;
@@ -101,15 +112,19 @@ function highlightable(content: string | null): content is string {
 export async function fileDiff(
   paseo: PaseoApi,
   input: BranchRange & { path: string; oldPath: string | null; syntaxTheme: string; scheme: "light" | "dark" },
-): Promise<DiffLine[]> {
+): Promise<{ lines: DiffLine[]; base: string }> {
   const git = await gitIn(paseo, input.workspaceId);
   const paths = input.oldPath ? [input.oldPath, input.path] : [input.path];
-  const patch = parsePatch(await git(["diff", "-M", "--no-ext-diff", ...range(input), "--", ...paths]));
-  if (!isLanguageSupported(input.path)) return patch.map((line) => ({ ...line, tokens: null }));
+  const [diff, mergeBase] = await Promise.all([
+    git(["diff", "-M", "--no-ext-diff", ...range(input), "--", ...paths]),
+    git(["merge-base", "--end-of-options", input.parent, input.branch]),
+  ]);
+  const base = mergeBase.trim();
+  const patch = parsePatch(diff);
+  if (!isLanguageSupported(input.path)) return { base, lines: patch.map((line) => ({ ...line, tokens: null })) };
 
   // Highlight whole files, not hunks, so multi-line comments and strings color correctly.
   // An added file has no old side and a deleted one no new side; `git show` fails for those.
-  const base = (await git(["merge-base", "--end-of-options", input.parent, input.branch])).trim();
   const show = (spec: string) => git(["show", "--end-of-options", spec]).catch(() => null);
   const [oldContent, newContent] = await Promise.all([
     show(`${base}:${input.oldPath ?? input.path}`),
@@ -119,13 +134,13 @@ export async function fileDiff(
   const newTokens = highlightable(newContent) ? highlightCode(newContent, input.path) : null;
 
   const palette = resolveSyntaxColors(isSyntaxThemeId(input.syntaxTheme) ? input.syntaxTheme : "one", input.scheme);
-  const colored = (tokens: HighlightToken[] | undefined) =>
-    tokens?.map((token) => ({ text: token.text, color: token.style ? palette[token.style] : null })) ?? null;
-  return patch.map((line) => {
+  const colored = (tokens: HighlightToken[] | undefined) => colorTokens(tokens, palette);
+  const lines = patch.map((line) => {
     if (line.kind === "delete") return { ...line, tokens: colored(oldTokens?.[line.oldNumber! - 1]) };
     if (line.kind === "add" || line.kind === "context") {
       return { ...line, tokens: colored(newTokens?.[line.newNumber! - 1]) };
     }
     return { ...line, tokens: null };
   });
+  return { base, lines };
 }

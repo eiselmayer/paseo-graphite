@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { ChangedFile } from "../shared/contracts";
+import { sampleScreenAgents } from "./agent-target";
 
 export interface DiffSelection {
   branch: string;
@@ -19,6 +20,8 @@ export function setDiffPanelOpener(opener: ((workspaceId: string) => void) | nul
 export function showDiff(workspaceId: string, selection: DiffSelection): void {
   selections.set(workspaceId, selection);
   for (const listener of listeners) listener();
+  // The diff tab may cover the agent's; note which agent was on screen before it does.
+  sampleScreenAgents();
   openDiffPanel?.(workspaceId);
 }
 

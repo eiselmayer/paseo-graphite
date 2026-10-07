@@ -55,7 +55,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(getBranchChanges, async (input, { paseo }) => ({
     files: await branchChanges(paseo, input),
   }));
-  server.handle(getFileDiff, async (input, { paseo }) => ({ lines: await fileDiff(paseo, input) }));
+  server.handle(getFileDiff, (input, { paseo }) => fileDiff(paseo, input));
   server.handle(getWorkspaceEnabled, async ({ workspaceId }, { paseo }) => ({
     enabled: await isWorkspaceEnabled(paseo, settings, workspaceId),
   }));

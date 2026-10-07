@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { parseChangedFiles } from "./changes.ts";
+import { highlightCode, resolveSyntaxColors } from "@getpaseo/highlight";
+
+import { colorTokens, parseChangedFiles } from "./changes.ts";
 
 test("parseChangedFiles joins name-status and numstat for every kind of change", () => {
   const directory = mkdtempSync(join(tmpdir(), "paseo-graphite-changes-"));
@@ -56,4 +58,13 @@ test("parseChangedFiles joins name-status and numstat for every kind of change",
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("styles missing from the palette, like Markdown's heading marks, get the default color", () => {
+  const [heading] = highlightCode("## Setup\n", "README.md");
+  const colors = colorTokens(heading, resolveSyntaxColors("one", "dark"));
+  assert.ok(colors && colors.length > 0);
+  assert.ok(colors.every((token) => token.color === null || typeof token.color === "string"));
+  assert.equal(colors[0].text, "##");
+  assert.equal(colors[0].color, null);
 });
