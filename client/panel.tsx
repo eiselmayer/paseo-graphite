@@ -119,7 +119,8 @@ export function GraphiteStackPanel({
 
   const styles = useMemo(
     () => ({
-      screen: { flex: 1, backgroundColor: theme.colors.surface0 },
+      // No fill: the Explorer host paints the sidebar color, which plugin themes do not carry.
+      screen: { flex: 1 },
       content: { padding: layout.compact ? 10 : 12, gap: 9 },
       title: { color: theme.colors.foreground, fontSize: 18, fontWeight: "700" as const },
       detail: { color: theme.colors.foregroundMuted, fontSize: 11 },
