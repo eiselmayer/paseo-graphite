@@ -20,6 +20,7 @@ const localBranch: LocalBranch = {
   graphiteUrl: "https://app.graphite.com/github/pr/example/repo/42",
   prNumber: 42,
   graphiteTitle: "Ready change",
+  knownHeads: [],
 };
 
 const readyPr: GithubPr = {
@@ -119,39 +120,4 @@ test("concurrent cache misses share one stack inspection", async () => {
   const results = await Promise.all(requests);
   assert.equal(results.length, 20);
   assert.ok(results.every((result) => result.workspaceId === "workspace-concurrent"));
-});
-
-test("different workspaces are inspected serially", async () => {
-  const releases: Array<() => void> = [];
-  let active = 0;
-  let peak = 0;
-  const paseo = {
-    workspaces: {
-      ref: (workspaceId: string) => ({
-        refresh: async () => {
-          active += 1;
-          peak = Math.max(peak, active);
-          await new Promise<void>((resolve) => releases.push(resolve));
-          active -= 1;
-          return {
-            id: workspaceId,
-            name: workspaceId,
-            title: null,
-            workspaceDirectory: null,
-          };
-        },
-      }),
-    },
-  } as unknown as PaseoApi;
-
-  const first = inspectWorkspaceStack(paseo, "serialized-a", true);
-  const second = inspectWorkspaceStack(paseo, "serialized-b", true);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(active, 1);
-  releases.shift()?.();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(active, 1);
-  releases.shift()?.();
-  await Promise.all([first, second]);
-  assert.equal(peak, 1);
 });

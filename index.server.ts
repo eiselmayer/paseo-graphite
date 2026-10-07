@@ -34,7 +34,7 @@ export default function contribute(server: PluginServerContext) {
     return inspectWorkspaceStack(paseo, workspaceId, refresh ?? false);
   });
   // Both run gt, so both are refused where Graphite is off, like getStack. They answer as
-  // soon as gt is done: reading the stack again waits in the shared inspection queue.
+  // soon as gt is done and drop the workspace's cached stack, so the next read is fresh.
   async function requireEnabled(paseo: Parameters<typeof isWorkspaceEnabled>[0], workspaceId: string) {
     if (!(await isWorkspaceEnabled(paseo, settings, workspaceId))) {
       throw new Error("Graphite is off for this project.");

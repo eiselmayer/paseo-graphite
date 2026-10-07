@@ -4,108 +4,24 @@ import type {
   StackBranch,
   StackSnapshot,
 } from "../shared/contracts";
+import { forgetGraphiteRepo, type GraphiteRepo, parseOrigin, readGraphiteRepo, readHead } from "./graphite-data";
+import { type GithubPr, loadPrs, type PrLookup, type Repository } from "./github";
 import { findBinary, runCommand, stripAnsi } from "./process";
+import { type LocalBranch, stackBranches } from "./stack";
+
+export type { GithubPr } from "./github";
+export type { LocalBranch } from "./stack";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
-const CACHE_MS = 30_000;
-const MAX_CACHE_ENTRIES = 128;
-const COMMAND_CONCURRENCY = 1;
-const cache = new Map<string, { expiresAt: number; value: StackSnapshot }>();
-const inFlight = new Map<string, Promise<StackSnapshot>>();
-let inspectionTail: Promise<unknown> = Promise.resolve();
-
-function enqueueInspection(work: () => Promise<StackSnapshot>): Promise<StackSnapshot> {
-  const request = inspectionTail.then(work, work);
-  inspectionTail = request.then(
-    () => undefined,
-    () => undefined,
-  );
-  return request;
-}
-
-type JsonObject = Record<string, unknown>;
-
-export interface LocalBranch {
-  branch: string;
-  current: boolean;
-  localStatus: string | null;
-  parent: string | null;
-  submittedVersion: string | null;
-  remoteStatus: string | null;
-  graphitePrStatus: string | null;
-  graphiteUrl: string | null;
-  prNumber: number | null;
-  graphiteTitle: string | null;
-}
-
-export interface GithubPr {
-  number: number;
-  title: string;
-  url: string;
-  state: string;
-  isDraft: boolean;
-  author: string | null;
-  viewerIsAuthor: boolean;
-  baseBranch: string;
-  headBranch: string;
-  mergeable: string;
-  mergeStateStatus: string;
-  reviewDecision: string;
-  reviewRequests: string[];
-  totalThreads: number;
-  resolvedThreads: number;
-  unresolvedThreads: number;
-  checks: {
-      total: number;
-      passed: number;
-      pending: number;
-      failed: number;
-      requiredTotal: number;
-      requiredPassed: number;
-      requiredPending: number;
-      requiredFailed: number;
-      failingNames: string[];
-      requiredFailingNames: string[];
-  };
-  updatedAt: string;
-}
-
-const PR_QUERY = `
-query($owner:String!,$name:String!,$number:Int!){
-  viewer{login}
-  repository(owner:$owner,name:$name){
-    pullRequest(number:$number){
-      number title url state isDraft updatedAt headRefName baseRefName mergeable mergeStateStatus reviewDecision
-      author{login}
-      baseRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
-      reviewRequests(first:20){nodes{requestedReviewer{... on User{login} ... on Team{slug}}}}
-      reviewThreads(first:100){totalCount nodes{isResolved}}
-      commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{
-        ... on CheckRun{name status conclusion detailsUrl}
-        ... on StatusContext{context state targetUrl}
-      }}}}}}
-    }
-  }
-}`;
-
-function object(value: unknown): JsonObject | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as JsonObject)
-    : null;
-}
-
-function array(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function text(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function bool(value: unknown): boolean {
-  return value === true;
-}
+const inFlight = new Map<string, { forced: boolean; snapshot: Promise<StackSnapshot> }>();
+// Each inspected workspace's shared git directory, to drop its repository's data after a gt command.
+const commonDirs = new Map<string, string>();
+// Reading a stack through gt takes half a second per branch, so those stacks are reused a while.
+const GT_STACK_TTL_MS = 30_000;
+const gtStacks = new Map<string, { readAt: number; branch: string; value: Promise<LocalStack> }>();
+// And read one at a time, as gt is heavy.
+let gtQueue: Promise<unknown> = Promise.resolve();
 
 export function emptySnapshot(input: {
   workspaceId: string;
@@ -136,14 +52,6 @@ export function emptySnapshot(input: {
   };
 }
 
-function parseOrigin(remote: string): { owner: string; name: string } | null {
-  const value = remote.trim().replace(/\.git$/, "");
-  const ssh = value.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^/]+)\/([^/]+)$/i);
-  const https = value.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/i);
-  const match = ssh ?? https;
-  return match ? { owner: match[1], name: match[2] } : null;
-}
-
 export function parseGraphiteLog(output: string, trunk: string | null): LocalBranch[] {
   const branches: LocalBranch[] = [];
   for (const raw of stripAnsi(output).split(/\r?\n/)) {
@@ -162,6 +70,7 @@ export function parseGraphiteLog(output: string, trunk: string | null): LocalBra
       graphiteUrl: null,
       prNumber: null,
       graphiteTitle: null,
+      knownHeads: [],
     });
   }
   return branches;
@@ -185,119 +94,6 @@ export function parseGraphiteInfo(branch: LocalBranch, output: string): LocalBra
     graphiteUrl: url,
     prNumber: prLine ? Number(prLine[1]) : null,
     graphiteTitle: prLine?.[3]?.trim() ?? null,
-  };
-}
-
-function checkSummary(nodes: unknown[], requiredContexts: Set<string>): GithubPr["checks"] {
-  let passed = 0;
-  let pending = 0;
-  let failed = 0;
-  let requiredPassed = 0;
-  let requiredPending = 0;
-  let requiredFailed = 0;
-  const requiredSeen = new Set<string>();
-  const failingNames: string[] = [];
-  const requiredFailingNames: string[] = [];
-  const failureValues = new Set([
-    "FAILURE",
-    "ERROR",
-    "TIMED_OUT",
-    "ACTION_REQUIRED",
-    "CANCELLED",
-    "STARTUP_FAILURE",
-  ]);
-  for (const value of nodes) {
-    const node = object(value);
-    if (!node) continue;
-    const name = text(node.name) || text(node.context) || "Unnamed check";
-    const status = text(node.status).toUpperCase();
-    const conclusion = (text(node.conclusion) || text(node.state)).toUpperCase();
-    const required = requiredContexts.has(name);
-    if (required) requiredSeen.add(name);
-    if ((status && status !== "COMPLETED") || conclusion === "PENDING" || conclusion === "EXPECTED") {
-      pending += 1;
-      if (required) requiredPending += 1;
-    } else if (failureValues.has(conclusion)) {
-      failed += 1;
-      if (required) {
-        requiredFailed += 1;
-        if (requiredFailingNames.length < 5) requiredFailingNames.push(name);
-      }
-      if (failingNames.length < 5) failingNames.push(name);
-    } else {
-      passed += 1;
-      if (required) requiredPassed += 1;
-    }
-  }
-  requiredPending += Math.max(0, requiredContexts.size - requiredSeen.size);
-  return {
-    total: nodes.length,
-    passed,
-    pending,
-    failed,
-    requiredTotal: requiredContexts.size,
-    requiredPassed,
-    requiredPending,
-    requiredFailed,
-    failingNames,
-    requiredFailingNames,
-  };
-}
-
-export function parseGithubPr(payload: unknown): { viewer: string | null; pr: GithubPr | null } {
-  const root = object(payload);
-  const data = object(root?.data);
-  const viewer = text(object(data?.viewer)?.login) || null;
-  const repository = object(data?.repository);
-  const pr = object(repository?.pullRequest);
-  if (!pr) return { viewer, pr: null };
-
-  const reviewThreads = object(pr.reviewThreads);
-  const threadNodes = array(reviewThreads?.nodes).map(object).filter((thread) => thread !== null);
-  const reportedTotal = Number(reviewThreads?.totalCount);
-  const totalThreads = Number.isInteger(reportedTotal) && reportedTotal >= 0
-    ? reportedTotal
-    : threadNodes.length;
-  const resolvedThreads = threadNodes.filter((thread) => bool(thread.isResolved)).length;
-  const unresolvedThreads = Math.max(0, totalThreads - resolvedThreads);
-
-  const commit = object(array(object(pr.commits)?.nodes).at(-1));
-  const commitData = object(commit?.commit);
-  const rollup = object(commitData?.statusCheckRollup);
-  const contexts = array(object(rollup?.contexts)?.nodes);
-  const baseRef = object(pr.baseRef);
-  const protection = object(baseRef?.branchProtectionRule);
-  const requiredContexts = new Set(array(protection?.requiredStatusCheckContexts).map(text).filter(Boolean));
-  const reviewRequests = array(object(pr.reviewRequests)?.nodes)
-    .map((entry) => {
-      const value = object(object(entry)?.requestedReviewer);
-      return text(value?.login) || text(value?.slug);
-    })
-    .filter(Boolean);
-  const author = text(object(pr.author)?.login) || null;
-
-  return {
-    viewer,
-    pr: {
-      number: Number(pr.number),
-      title: text(pr.title),
-      url: text(pr.url),
-      state: text(pr.state),
-      isDraft: bool(pr.isDraft),
-      author,
-      viewerIsAuthor: author !== null && viewer === author,
-      baseBranch: text(pr.baseRefName),
-      headBranch: text(pr.headRefName),
-      mergeable: text(pr.mergeable),
-      mergeStateStatus: text(pr.mergeStateStatus),
-      reviewDecision: text(pr.reviewDecision),
-      reviewRequests,
-      totalThreads,
-      resolvedThreads,
-      unresolvedThreads,
-      checks: checkSummary(contexts, requiredContexts),
-      updatedAt: text(pr.updatedAt),
-    },
   };
 }
 
@@ -401,21 +197,80 @@ export function attention(local: LocalBranch, pr: GithubPr | null): StackBranch[
   return { level: "waiting", reasons: [], label: "No action right now", command: null };
 }
 
-async function mapLimit<T, R>(values: readonly T[], limit: number, work: (value: T) => Promise<R>): Promise<R[]> {
-  const result = new Array<R>(values.length);
-  let cursor = 0;
-  async function worker() {
-    for (;;) {
-      const index = cursor++;
-      if (index >= values.length) return;
-      result[index] = await work(values[index]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => worker()));
-  return result;
+type Problem = Pick<Parameters<typeof emptySnapshot>[0], "kind" | "message" | "hint">;
+
+type LocalStack = { trunk: string | null; repository: Repository | null } & (
+  | { branches: LocalBranch[] }
+  | { problem: Problem }
+);
+
+function untracked(branch: string): Problem {
+  return {
+    kind: "untracked",
+    message: `${branch} is not tracked by Graphite.`,
+    hint: "Tracking stacks it on its nearest tracked ancestor.",
+  };
 }
 
-async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnapshot> {
+function onTrunk(trunk: string): Problem {
+  // Graphite lists every tracked branch there, not a stack of this workspace.
+  return { kind: "not-graphite", message: `On ${trunk}, no stack.`, hint: null };
+}
+
+function repoStack(repo: GraphiteRepo, currentBranch: string): LocalStack {
+  const { trunk, repository } = repo;
+  if (currentBranch === trunk) return { trunk, repository, problem: onTrunk(trunk) };
+  const branches = stackBranches(repo, currentBranch);
+  return branches ? { trunk, repository, branches } : { trunk, repository, problem: untracked(currentBranch) };
+}
+
+/** The stack as gt prints it, a command per branch. For gt versions whose files `readGraphiteRepo` cannot read. */
+async function gtStack(gt: string, git: string, directory: string, currentBranch: string): Promise<LocalStack> {
+  const [trunkResult, originResult] = await Promise.all([
+    runCommand(gt, ["trunk", "--no-interactive"], { cwd: directory, timeoutMs: 10_000 }),
+    runCommand(git, ["remote", "get-url", "origin"], { cwd: directory, timeoutMs: 8_000 }),
+  ]);
+  const trunk = trunkResult.ok ? stripAnsi(trunkResult.stdout).trim().split(/\s+/).at(-1) ?? null : null;
+  const repository = originResult.ok ? parseOrigin(originResult.stdout) : null;
+  if (trunk !== null && currentBranch === trunk) return { trunk, repository, problem: onTrunk(trunk) };
+
+  const logResult = await runCommand(gt, ["log", "short", "--stack", "--no-interactive"], {
+    cwd: directory,
+    timeoutMs: 15_000,
+  });
+  if (!logResult.ok) {
+    const detail = `${logResult.stdout}\n${logResult.stderr}`;
+    if (/untracked branch/i.test(detail)) return { trunk, repository, problem: untracked(currentBranch) };
+    return {
+      trunk,
+      repository,
+      problem: {
+        kind: "not-graphite",
+        message: "Graphite could not read a stack for this workspace.",
+        hint: detail.trim().split(/\r?\n/)[0] || null,
+      },
+    };
+  }
+
+  const branches: LocalBranch[] = [];
+  for (const branch of parseGraphiteLog(logResult.stdout, trunk)) {
+    const info = await runCommand(gt, ["info", branch.branch, "--no-interactive"], {
+      cwd: directory,
+      timeoutMs: 15_000,
+    });
+    branches.push(info.ok ? parseGraphiteInfo(branch, info.stdout) : branch);
+  }
+  if (branches.length === 0) {
+    return {
+      trunk,
+      repository,
+      problem: { kind: "not-graphite", message: "Graphite returned no tracked branches for this stack.", hint: null },
+    };
+  }
+  return { trunk, repository, branches };
+}
+
+async function inspect(paseo: PaseoApi, workspaceId: string, refresh: boolean): Promise<StackSnapshot> {
   const workspace = await paseo.workspaces.ref(workspaceId).refresh();
   if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
   const directory = workspace.workspaceDirectory;
@@ -425,115 +280,64 @@ async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnaps
   }
 
   const [git, gt, gh] = await Promise.all([findBinary("git"), findBinary("gt"), findBinary("gh")]);
-  if (!git || !gt) {
-    return emptySnapshot({
+  const missingCli = (message: string) =>
+    emptySnapshot({
       workspaceId,
       workspaceName,
       directory,
       kind: "missing-cli",
-      message: !gt ? "Graphite CLI (gt) is not available to the Paseo daemon." : "Git is not available to the Paseo daemon.",
+      message,
       hint: "Install the missing CLI and reload the plugin.",
     });
+  if (!git) return missingCli("Git is not available to the Paseo daemon.");
+
+  // Graphite keeps its data in the git directory all of the repository's worktrees share.
+  const head = await readHead(git, directory);
+  const currentBranch = head?.branch ?? null;
+  if (!head || !currentBranch) {
+    return emptySnapshot({ workspaceId, workspaceName, directory, kind: "not-git", message: "The workspace is not on a Git branch." });
   }
+  const { commonDir } = head;
+  commonDirs.set(workspaceId, commonDir);
 
-  const branchResult = await runCommand(git, ["branch", "--show-current"], { cwd: directory, timeoutMs: 8_000 });
-  const currentBranch = branchResult.stdout.trim() || null;
-  if (!branchResult.ok || !currentBranch) {
-    return emptySnapshot({ workspaceId, workspaceName, directory, currentBranch, kind: "not-git", message: "The workspace is not on a Git branch." });
-  }
-
-  const [trunkResult, originResult] = await Promise.all([
-    runCommand(gt, ["trunk", "--no-interactive"], { cwd: directory, timeoutMs: 10_000 }),
-    runCommand(git, ["remote", "get-url", "origin"], { cwd: directory, timeoutMs: 8_000 }),
-  ]);
-  const trunk = trunkResult.ok ? stripAnsi(trunkResult.stdout).trim().split(/\s+/).at(-1) ?? null : null;
-  const repository = originResult.ok ? parseOrigin(originResult.stdout) : null;
-
-  const logResult = await runCommand(gt, ["log", "short", "--stack", "--no-interactive"], {
-    cwd: directory,
-    timeoutMs: 15_000,
-  });
-  if (!logResult.ok) {
-    const detail = `${logResult.stdout}\n${logResult.stderr}`;
-    const untracked = /untracked branch/i.test(detail);
+  const repo = await readGraphiteRepo(git, commonDir, directory, refresh);
+  let stack: LocalStack;
+  if (repo) stack = repoStack(repo, currentBranch);
+  else if (gt) {
+    const cached = gtStacks.get(workspaceId);
+    if (refresh || cached?.branch !== currentBranch || Date.now() - cached.readAt > GT_STACK_TTL_MS) {
+      const value = gtQueue.then(() => gtStack(gt, git, directory, currentBranch));
+      gtQueue = value.catch(() => undefined);
+      gtStacks.set(workspaceId, { readAt: Date.now(), branch: currentBranch, value });
+    }
+    stack = await gtStacks.get(workspaceId)!.value;
+  } else return missingCli("Graphite CLI (gt) is not available to the Paseo daemon.");
+  const { trunk, repository } = stack;
+  if ("problem" in stack) {
     return {
-      ...emptySnapshot({
-        workspaceId,
-        workspaceName,
+      ...emptySnapshot({ workspaceId, workspaceName, directory, currentBranch, ...stack.problem }),
+      trunk,
+      repository,
+    };
+  }
+
+  const localBranches = stack.branches;
+  const github = gh && repository
+    ? await loadPrs(
+        gh,
         directory,
-        currentBranch,
-        kind: untracked ? "untracked" : "not-graphite",
-        message: untracked
-          ? `${currentBranch} is not tracked by Graphite.`
-          : "Graphite could not read a stack for this workspace.",
-        hint: untracked ? "Tracking stacks it on its nearest tracked ancestor." : detail.trim().split(/\r?\n/)[0] || null,
-      }),
-      trunk,
-      repository,
-    };
-  }
-
-  let localBranches = parseGraphiteLog(logResult.stdout, trunk);
-  if (localBranches.length === 0) {
-    return {
-      ...emptySnapshot({ workspaceId, workspaceName, directory, currentBranch, kind: "not-graphite", message: "Graphite returned no tracked branches for this stack." }),
-      trunk,
-      repository,
-    };
-  }
-
-  localBranches = await mapLimit(localBranches, COMMAND_CONCURRENCY, async (branch) => {
-    const info = await runCommand(gt, ["info", branch.branch, "--no-interactive"], {
-      cwd: directory,
-      timeoutMs: 15_000,
-    });
-    return info.ok ? parseGraphiteInfo(branch, info.stdout) : branch;
-  });
-
-  let viewer: string | null = null;
-  const githubByNumber = new Map<number, GithubPr>();
-  const submittedBranches = localBranches.filter((branch) => branch.prNumber !== null);
-  let githubFailures = 0;
-  if (gh && repository) {
-    await mapLimit(
-      submittedBranches,
-      COMMAND_CONCURRENCY,
-      async (branch) => {
-        const result = await runCommand(
-          gh,
-          [
-            "api",
-            "graphql",
-            "-f",
-            `owner=${repository.owner}`,
-            "-f",
-            `name=${repository.name}`,
-            "-F",
-            `number=${branch.prNumber}`,
-            "-f",
-            `query=${PR_QUERY}`,
-          ],
-          { cwd: directory, timeoutMs: 25_000 },
-        );
-        if (!result.ok) {
-          githubFailures += 1;
-          return;
-        }
-        try {
-          const parsed = parseGithubPr(JSON.parse(result.stdout));
-          if (parsed.viewer) viewer = parsed.viewer;
-          if (parsed.pr && branch.prNumber !== null) githubByNumber.set(branch.prNumber, parsed.pr);
-          else githubFailures += 1;
-        } catch {
-          // A malformed response leaves Graphite-local data visible instead of hiding the stack.
-          githubFailures += 1;
-        }
-      },
-    );
-  }
+        repository,
+        // Branches gt submitted but no longer lists a PR for, as after a merge, are looked up by name.
+        localBranches.flatMap(({ branch, prNumber, knownHeads }): PrLookup[] => {
+          if (prNumber !== null) return [{ branch, number: prNumber }];
+          return knownHeads.length > 0 ? [{ branch, number: null, heads: knownHeads }] : [];
+        }),
+        refresh,
+      )
+    : null;
 
   const branches: StackBranch[] = localBranches.map((local) => {
-    const pr = local.prNumber === null ? null : githubByNumber.get(local.prNumber) ?? null;
+    const pr = github?.prs.get(local.branch) ?? null;
     const fallbackPr =
       pr ??
       (local.prNumber !== null && local.graphiteUrl
@@ -599,20 +403,21 @@ async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnaps
         ? "Waiting on others"
         : "Stack clear";
 
-  const missingGithub = submittedBranches.length - githubByNumber.size;
-  const githubWarning = submittedBranches.length > 0 && missingGithub > 0
+  const submitted = localBranches.filter((branch) => branch.prNumber !== null).length;
+  const missingGithub = github ? github.failed : submitted;
+  const githubWarning = submitted > 0 && missingGithub > 0
     ? {
         kind: "github" as const,
         message: !gh
           ? "GitHub CLI (gh) is unavailable, so review and check status could not be loaded."
           : !repository
             ? "This Git remote is not a GitHub repository, so review and check status could not be loaded."
-            : `GitHub status could not be loaded for ${missingGithub} of ${submittedBranches.length} PRs.`,
+            : `GitHub status could not be loaded for ${missingGithub} of ${submitted} PRs.`,
         hint: !gh
           ? "Install and authenticate gh, then refresh."
-          : githubFailures > 0
-            ? "Check gh authentication and repository access, then refresh."
-            : "Check the origin remote and refresh.",
+          : !repository
+            ? "Check the origin remote and refresh."
+            : "Check gh authentication and repository access, then refresh.",
       }
     : null;
 
@@ -623,7 +428,7 @@ async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnaps
     currentBranch,
     trunk,
     repository,
-    viewer,
+    viewer: github?.viewer ?? null,
     inspectedAt: new Date().toISOString(),
     available: true,
     unavailable: githubWarning,
@@ -632,45 +437,25 @@ async function inspect(paseo: PaseoApi, workspaceId: string): Promise<StackSnaps
   };
 }
 
-// Bumped by invalidateStack so an inspection that started earlier does not cache its stale result.
-const generations = new Map<string, number>();
-
-/** Drops the cached and in-flight stack after a command changed the repository. */
+/** Drops what a gt command changed: the repository's Graphite data and any inspection under way. */
 export function invalidateStack(workspaceId: string): void {
-  cache.delete(workspaceId);
   inFlight.delete(workspaceId);
-  generations.set(workspaceId, (generations.get(workspaceId) ?? 0) + 1);
+  gtStacks.delete(workspaceId);
+  const commonDir = commonDirs.get(workspaceId);
+  if (commonDir) forgetGraphiteRepo(commonDir);
 }
 
-export async function inspectWorkspaceStack(
+export function inspectWorkspaceStack(
   paseo: PaseoApi,
   workspaceId: string,
   refresh = false,
 ): Promise<StackSnapshot> {
-  const cached = cache.get(workspaceId);
-  if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
+  // A manual refresh does not settle for a poll that is already under way.
   const running = inFlight.get(workspaceId);
-  if (running) return running;
-  const generation = generations.get(workspaceId) ?? 0;
-  const request = enqueueInspection(() => inspect(paseo, workspaceId))
-    .then((value) => {
-      if ((generations.get(workspaceId) ?? 0) !== generation) return value;
-      const now = Date.now();
-      for (const [key, entry] of cache) {
-        if (entry.expiresAt <= now) cache.delete(key);
-      }
-      cache.delete(workspaceId);
-      while (cache.size >= MAX_CACHE_ENTRIES) {
-        const oldest = cache.keys().next().value;
-        if (oldest === undefined) break;
-        cache.delete(oldest);
-      }
-      cache.set(workspaceId, { expiresAt: now + CACHE_MS, value });
-      return value;
-    })
-    .finally(() => {
-      if (inFlight.get(workspaceId) === request) inFlight.delete(workspaceId);
-    });
-  inFlight.set(workspaceId, request);
-  return request;
+  if (running && (running.forced || !refresh)) return running.snapshot;
+  const snapshot = inspect(paseo, workspaceId, refresh).finally(() => {
+    if (inFlight.get(workspaceId)?.snapshot === snapshot) inFlight.delete(workspaceId);
+  });
+  inFlight.set(workspaceId, { forced: refresh, snapshot });
+  return snapshot;
 }

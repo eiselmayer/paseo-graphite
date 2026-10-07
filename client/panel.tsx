@@ -21,7 +21,7 @@ import { MenuRow } from "./comment-box";
 import { dispatchFixAll, sendFixAll } from "./fix-all";
 import { CompactPrRow } from "./pr-row";
 import { withTimeout } from "./timeout";
-import { publishStack, stackQueryKey } from "./status";
+import { publishStack, STACK_REFRESH_MS, stackQueryKey } from "./status";
 
 function Count({
   label,
@@ -63,8 +63,8 @@ export function GraphiteStackPanel({
   const query = useQuery({
     queryKey: stackQueryKey(workspaceId),
     queryFn: () => inspect({ workspaceId }),
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    staleTime: STACK_REFRESH_MS / 2,
+    refetchInterval: STACK_REFRESH_MS,
   });
   const refresh = useMutation({
     mutationFn: () => inspect({ workspaceId, refresh: true }),

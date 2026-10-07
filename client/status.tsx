@@ -15,6 +15,10 @@ const listeners = new Map<string, Set<Listener>>();
 
 export const stackQueryKey = (workspaceId: string) => ["paseo-graphite", "stack", workspaceId] as const;
 
+// Reading a stack takes the daemon milliseconds, and it asks GitHub once a minute per repository,
+// so the stack can refresh often.
+export const STACK_REFRESH_MS = 10_000;
+
 export function publishStack(snapshot: StackSnapshot): void {
   latest.set(snapshot.workspaceId, snapshot);
   for (const listener of listeners.get(snapshot.workspaceId) ?? []) listener(snapshot);
@@ -50,8 +54,8 @@ export function StackStatusIcon({ workspaceId, size, color, theme }: PluginButto
   const query = useQuery({
     queryKey: stackQueryKey(workspaceId),
     queryFn: () => inspect({ workspaceId }),
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    staleTime: STACK_REFRESH_MS / 2,
+    refetchInterval: STACK_REFRESH_MS,
   });
   useEffect(() => {
     if (query.data) publishStack(query.data);

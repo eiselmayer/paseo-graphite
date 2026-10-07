@@ -70,9 +70,13 @@ reasons so a branch can say both `Review comments` and `CI failed`.
 - Dense Explorer workspace panel.
 - Global Graphite PR center in the left sidebar and Command Center.
 - Workspace header button and per-agent composer pill.
-- 60-second client refresh, 30-second daemon cache, and manual forced refresh.
-- Stack discovery through `gt log short --stack` and `gt info <branch>` in the exact workspace.
-- GitHub GraphQL enrichment through the authenticated `gh` CLI.
+- 10-second client refresh and manual forced refresh.
+- Stack discovery from the files Graphite keeps in the repository's shared git directory, read
+  once for all of its worktrees. `gt log short --stack` and `gt info <branch>` remain the
+  fallback for gt versions that store them differently.
+- GitHub GraphQL enrichment through the authenticated `gh` CLI: one batched query per
+  repository at most once a minute, shared by its worktrees and by every plugin process that
+  runs this server code.
 - Resolved/total review-thread counts and check counts without comment bodies.
 - `/pr-stack` to open the Explorer panel.
 - A contextual hint to use the user's existing `/fix-pr` command for review feedback. The plugin
