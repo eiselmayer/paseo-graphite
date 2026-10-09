@@ -136,7 +136,6 @@ export default function contribute(client: PluginClientContext) {
     button: PluginButtonRegistration;
     unsubscribeStatus: () => void;
   };
-  const headers = new Map<string, RegisteredButton>();
   const pills = new Map<string, RegisteredButton>();
   const enabled = new Map<string, boolean>();
   const checks = new Map<string, number>();
@@ -155,22 +154,6 @@ export default function contribute(client: PluginClientContext) {
         },
       },
     };
-  }
-
-  function registerHeader(workspaceId: string) {
-    if (headers.has(workspaceId)) return;
-    const button = client.addHeaderButton({ id: "graphite-stack", workspaceId, button: descriptor(workspaceId) });
-    const unsubscribeStatus = subscribeStack(workspaceId, (snapshot) =>
-      button.update({ label: buttonLabel(snapshot), title: buttonTitle(snapshot) }),
-    );
-    headers.set(workspaceId, { workspaceId, button, unsubscribeStatus });
-  }
-
-  function removeHeader(workspaceId: string) {
-    const entry = headers.get(workspaceId);
-    entry?.button.remove();
-    entry?.unsubscribeStatus();
-    headers.delete(workspaceId);
   }
 
   function registerPill(agent: { id: string; workspaceId?: string | null; status?: string }) {
@@ -202,7 +185,7 @@ export default function contribute(client: PluginClientContext) {
     pills.delete(agentId);
   }
 
-  // Buttons and pills appear only in workspaces whose project has Graphite turned on.
+  // Pills appear only in workspaces whose project has Graphite turned on.
   async function syncWorkspace(workspaceId: string) {
     const check = (checks.get(workspaceId) ?? 0) + 1;
     checks.set(workspaceId, check);
@@ -214,8 +197,6 @@ export default function contribute(client: PluginClientContext) {
     }
     if (stopped || checks.get(workspaceId) !== check) return;
     enabled.set(workspaceId, isEnabled);
-    if (isEnabled) registerHeader(workspaceId);
-    else removeHeader(workspaceId);
     for (const agent of agents.values()) {
       if (agent.workspaceId === workspaceId) registerPill(agent);
     }
@@ -224,7 +205,6 @@ export default function contribute(client: PluginClientContext) {
   function forgetWorkspace(workspaceId: string) {
     enabled.delete(workspaceId);
     checks.delete(workspaceId);
-    removeHeader(workspaceId);
   }
 
   function recheckAll() {
@@ -277,7 +257,6 @@ export default function contribute(client: PluginClientContext) {
     unsubscribeEnablement();
     unsubscribeWorkspaces();
     unsubscribeAgents();
-    for (const id of [...headers.keys()]) removeHeader(id);
     for (const id of [...pills.keys()]) removePill(id);
   };
 }
