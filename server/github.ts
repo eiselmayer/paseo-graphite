@@ -76,12 +76,17 @@ function bool(value: unknown): boolean {
 // turned on and removes it when that is turned off or the PR leaves the queue.
 const MERGE_LABEL = "merge-queue";
 
+// With parallel CI on, Graphite's merge queue closes the PRs it lands instead of merging them,
+// so GitHub reports them closed. See https://graphite.com/docs/merge-queue-optimizations
+const MERGE_QUEUE_CLOSER = "graphite-app";
+
 const PR_FRAGMENT = `
 fragment pr on PullRequest {
   number title url state isDraft updatedAt headRefName headRefOid baseRefName mergeable mergeStateStatus reviewDecision isCrossRepository
   author{login}
   autoMergeRequest{enabledAt}
   labels(first:20){nodes{name}}
+  timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{...on ClosedEvent{actor{login}}}}
   baseRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
   reviewRequests(first:20){nodes{requestedReviewer{... on User{login} ... on Team{slug}}}}
   reviewThreads(first:100){totalCount nodes{isResolved}}
@@ -233,12 +238,14 @@ export function parsePullRequest(pr: JsonObject, viewer: string | null): GithubP
     .filter(Boolean);
   const author = text(object(pr.author)?.login) || null;
   const labels = array(object(pr.labels)?.nodes).map((label) => text(object(label)?.name));
+  const closer = text(object(object(array(object(pr.timelineItems)?.nodes).at(-1))?.actor)?.login);
+  const state = text(pr.state) === "CLOSED" && closer === MERGE_QUEUE_CLOSER ? "MERGED" : text(pr.state);
 
   return {
     number: Number(pr.number),
     title: text(pr.title),
     url: text(pr.url),
-    state: text(pr.state),
+    state,
     isDraft: bool(pr.isDraft),
     author,
     viewerIsAuthor: author !== null && viewer === author,
@@ -277,7 +284,7 @@ const BATCH_CONCURRENCY = 3;
 // A lock whose process is gone is stale at once. This bounds one whose process id was reused.
 const LOCK_STALE_MS = 5 * 60_000;
 const LOCK_WAIT_MS = 30_000;
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 const CACHE_DIR =
   process.env.PASEO_GRAPHITE_CACHE_DIR || join(tmpdir(), `paseo-graphite-${process.getuid?.() ?? "user"}`);
 
