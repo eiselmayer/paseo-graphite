@@ -105,6 +105,15 @@ test("merge when ready is on with Graphite's merge label or GitHub's auto-merge"
   assert.equal(mergeWhenReady({}), false);
 });
 
+test("a PR Graphite's merge queue closed counts as merged", () => {
+  const state = (extra: object) =>
+    github.parsePullRequest({ number: 1, state: "CLOSED", ...extra }, "me").state;
+  const closedBy = (login: string) => ({ timelineItems: { nodes: [{ actor: { login } }] } });
+  assert.equal(state(closedBy("graphite-app")), "MERGED");
+  assert.equal(state(closedBy("MitchRivet")), "CLOSED");
+  assert.equal(state({}), "CLOSED");
+});
+
 test("a failed part of an answer is left out, an unknown PR number is not, and a failed answer is null", () => {
   const parsed = parseBatch(
     {
