@@ -146,11 +146,12 @@ export function attention(local: LocalBranch, pr: GithubPr | null): StackBranch[
     return actionAttention(reasons);
   }
 
-  if (graphitePrStatus.startsWith("queued to merge")) {
+  // gt prints a branch in Graphite's merge queue as merging.
+  if (localState.includes("merging") || graphitePrStatus.startsWith("queued to merge")) {
     return {
       level: "waiting",
       reasons: ["merge-queued"],
-      label: "Queued to merge",
+      label: "In merge queue",
       command: null,
     };
   }

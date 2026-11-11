@@ -64,10 +64,12 @@ function localBranch(repo: GraphiteRepo, branch: string, current: boolean): Loca
   let remoteStatus: string | null = null;
   if (version !== null && remoteVersion > version) remoteStatus = `remote at v${remoteVersion}, need get`;
   else if (submitted && tip !== submitted.headSha) remoteStatus = "local changes, need submit";
+  // gt prints a branch in the merge queue as merging. The queue rebases it, so it never needs a restack.
+  const restacked = repo.tips.get(tracked.parent) === tracked.parentRevision;
   return {
     branch,
     current,
-    localStatus: repo.tips.get(tracked.parent) === tracked.parentRevision ? null : "needs restack",
+    localStatus: pr?.inMergeQueue ? "merging" : restacked ? null : "needs restack",
     parent: tracked.parent,
     submittedVersion: version === null ? null : `v${version}`,
     remoteStatus,

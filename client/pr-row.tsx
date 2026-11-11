@@ -139,7 +139,7 @@ export function CompactPrRow({
         <Text style={{ color: tint, fontSize: 11, fontWeight: "600" }}>
           {branch.attention.label}
         </Text>
-        {pr?.mergeWhenReady && pr.state === "OPEN" ? (
+        {pr?.mergeWhenReady && pr.state === "OPEN" && !branch.attention.reasons.includes("merge-queued") ? (
           <View
             accessibilityLabel="Merge when ready is on"
             style={{ flexDirection: "row", alignItems: "center", gap: 3 }}

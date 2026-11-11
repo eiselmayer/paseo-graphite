@@ -26,12 +26,13 @@ function repo(overrides: { tips?: Record<string, string>; prs?: Record<string, G
   };
 }
 
-const pr = (number: number, versions: string[], status: string | null = null): GraphitePr => ({
+const pr = (number: number, versions: string[], status: string | null = null, inMergeQueue = false): GraphitePr => ({
   number,
   title: `PR ${number}`,
   url: `https://app.graphite.com/github/pr/example/repo/${number}`,
   versions,
   status,
+  inMergeQueue,
 });
 
 test("a stack lists the branches above the current one first, then its ancestors, without trunk", () => {
@@ -63,6 +64,19 @@ test("a branch needs a restack when its parent moved on from the commit it was s
       ["three", null],
       ["two", null],
       ["one", "needs restack"],
+    ],
+  );
+});
+
+test("a branch in Graphite's merge queue is merging, as gt prints it, and is left to the queue to rebase", () => {
+  // Trunk moves on while the queue lands other PRs.
+  const branches = stackBranches(repo({ tips: { main: "m2" }, prs: { one: pr(1, ["o1"], null, true) } }), "two")!;
+  assert.deepEqual(
+    branches.map((branch) => [branch.branch, branch.localStatus]),
+    [
+      ["three", null],
+      ["two", null],
+      ["one", "merging"],
     ],
   );
 });

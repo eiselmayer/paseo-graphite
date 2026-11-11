@@ -71,9 +71,24 @@ test("merge queue status wins over stale local restack metadata", () => {
     {
       level: "waiting",
       reasons: ["merge-queued"],
-      label: "Queued to merge",
+      label: "In merge queue",
       command: null,
     },
+  );
+});
+
+test("a branch gt shows as merging is in the merge queue until its PR merges or has a problem", () => {
+  const merging = { ...localBranch, localStatus: "merging", graphitePrStatus: null };
+  assert.deepEqual(attention(merging, readyPr), {
+    level: "waiting",
+    reasons: ["merge-queued"],
+    label: "In merge queue",
+    command: null,
+  });
+  assert.equal(attention(merging, { ...readyPr, state: "MERGED" }).label, "Merged");
+  assert.equal(
+    attention(merging, { ...readyPr, checks: { ...readyPr.checks, requiredFailed: 1 } }).label,
+    "Fix failing checks",
   );
 });
 

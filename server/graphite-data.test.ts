@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +81,27 @@ test("Graphite's files read as gt shows them, for every worktree at once", async
       ["one", 5, "Needs more approvals", "v1", null],
     ],
   );
+});
+
+test("a PR in Graphite's merge queue shows as merging, as gt log prints it", async () => {
+  const prInfo = join(gitDir, ".graphite_pr_info");
+  const saved = await readFile(prInfo, "utf8");
+  const info = JSON.parse(saved);
+  // As gt stores a PR it fetched while the PR was in the queue.
+  info.prInfos[0].mergeQueueStatus = { isInGraphiteMq: true, enqueuedCommit: one };
+  await writeFile(prInfo, JSON.stringify(info));
+  try {
+    const data = (await readGraphiteRepo(git, gitDir, worktree, true))!;
+    assert.deepEqual(
+      stackBranches(data, "two")?.map((branch) => [branch.branch, branch.localStatus]),
+      [
+        ["two", null],
+        ["one", "merging"],
+      ],
+    );
+  } finally {
+    await writeFile(prInfo, saved);
+  }
 });
 
 test("a read that fails for a moment is covered by the last good one; a repository never read has none", async () => {

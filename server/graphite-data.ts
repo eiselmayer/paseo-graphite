@@ -19,6 +19,8 @@ export interface GraphitePr {
   versions: string[];
   // Graphite's merge status, like QUEUED_TO_MERGE.
   status: string | null;
+  // In Graphite's merge queue. Queuing a PR does not always add the merge label.
+  inMergeQueue: boolean;
 }
 
 export interface GraphiteRepo {
@@ -229,6 +231,7 @@ function parsePrInfo(value: unknown): Map<string, GraphitePr> {
       url: typeof pr.url === "string" ? pr.url : "",
       versions,
       status: statuses.get(number) ?? null,
+      inMergeQueue: object(pr.mergeQueueStatus)?.isInGraphiteMq === true,
     });
   }
   return prs;
