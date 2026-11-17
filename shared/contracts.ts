@@ -34,6 +34,7 @@ const checkSummarySchema = z.object({
   requiredFailed: z.number().int().nonnegative(),
   failingNames: z.array(z.string()),
   requiredFailingNames: z.array(z.string()),
+  ciNotRun: z.boolean(),
 });
 
 export const stackBranchSchema = z.object({

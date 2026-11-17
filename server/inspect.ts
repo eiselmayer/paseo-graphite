@@ -371,6 +371,7 @@ async function inspect(paseo: PaseoApi, workspaceId: string, refresh: boolean): 
               requiredFailed: 0,
               failingNames: [],
               requiredFailingNames: [],
+              ciNotRun: false,
             },
             updatedAt: new Date().toISOString(),
           }

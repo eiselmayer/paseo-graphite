@@ -153,7 +153,9 @@ export function CompactPrRow({
             {pr.resolvedThreads}/{pr.totalThreads} comments
           </Text>
         ) : null}
-        {pr && checkTotal > 0 ? (
+        {pr?.checks.ciNotRun && checkFailed === 0 ? (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>CI not run</Text>
+        ) : pr && checkTotal > 0 ? (
           <Text
             style={{
               color: checkFailed > 0

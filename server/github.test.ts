@@ -114,6 +114,40 @@ test("a PR Graphite's merge queue closed counts as merged", () => {
   assert.equal(state({}), "CLOSED");
 });
 
+test("CI did not run when every GitHub Actions check on the commit was skipped", () => {
+  const ciNotRun = (...checks: object[]) =>
+    github.parsePullRequest(
+      {
+        number: 1,
+        state: "OPEN",
+        commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: checks } } } }] },
+      },
+      "me",
+    ).checks.ciNotRun;
+  const run = (name: string, conclusion: string | null, app = "github-actions") => ({
+    name,
+    status: conclusion ? "COMPLETED" : "IN_PROGRESS",
+    conclusion,
+    checkSuite: { app: { slug: app } },
+  });
+  // A draft the workflow skips, while other apps still report on it.
+  assert.equal(
+    ciNotRun(
+      run("Test", "SKIPPED"),
+      run("Build", "SKIPPED"),
+      run("CodeRabbit", "SKIPPED", "coderabbitai"),
+      run("Greptile Review", "SUCCESS", "greptile-apps"),
+    ),
+    true,
+  );
+  // The skipped run stays on the commit next to a real run that came later.
+  assert.equal(ciNotRun(run("Test", "SKIPPED"), run("Test", "SUCCESS")), false);
+  assert.equal(ciNotRun(run("Test", "SKIPPED"), run("Test", null)), false);
+  // Without a GitHub Actions check there is nothing to tell.
+  assert.equal(ciNotRun(run("Greptile Review", "SUCCESS", "greptile-apps"), { context: "ci/legacy", state: "SUCCESS" }), false);
+  assert.equal(ciNotRun(), false);
+});
+
 test("a failed part of an answer is left out, an unknown PR number is not, and a failed answer is null", () => {
   const parsed = parseBatch(
     {

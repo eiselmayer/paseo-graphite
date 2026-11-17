@@ -33,6 +33,9 @@ export interface GithubPr {
     requiredFailed: number;
     failingNames: string[];
     requiredFailingNames: string[];
+    // Every GitHub Actions check on the commit was skipped, so CI did not run on it, as on a
+    // draft its workflow skips. The counts above take a skipped check as passed.
+    ciNotRun: boolean;
   };
   updatedAt: string;
 }
@@ -80,6 +83,9 @@ const MERGE_LABEL = "merge-queue";
 // so GitHub reports them closed. See https://graphite.com/docs/merge-queue-optimizations
 const MERGE_QUEUE_CLOSER = "graphite-app";
 
+// The GitHub App behind every GitHub Actions check run.
+const GITHUB_ACTIONS_APP = "github-actions";
+
 const PR_FRAGMENT = `
 fragment pr on PullRequest {
   number title url state isDraft updatedAt headRefName headRefOid baseRefName mergeable mergeStateStatus reviewDecision isCrossRepository
@@ -91,7 +97,7 @@ fragment pr on PullRequest {
   reviewRequests(first:20){nodes{requestedReviewer{... on User{login} ... on Team{slug}}}}
   reviewThreads(first:100){totalCount nodes{isResolved}}
   commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{
-    ... on CheckRun{name status conclusion detailsUrl}
+    ... on CheckRun{name status conclusion detailsUrl checkSuite{app{slug}}}
     ... on StatusContext{context state targetUrl}
   }}}}}}
 }`;
@@ -164,6 +170,8 @@ function checkSummary(nodes: unknown[], requiredContexts: Set<string>): GithubPr
   let requiredPassed = 0;
   let requiredPending = 0;
   let requiredFailed = 0;
+  let actionsRuns = 0;
+  let actionsSkipped = 0;
   const requiredSeen = new Set<string>();
   const failingNames: string[] = [];
   const requiredFailingNames: string[] = [];
@@ -183,6 +191,10 @@ function checkSummary(nodes: unknown[], requiredContexts: Set<string>): GithubPr
     const conclusion = (text(node.conclusion) || text(node.state)).toUpperCase();
     const required = requiredContexts.has(name);
     if (required) requiredSeen.add(name);
+    if (text(object(object(node.checkSuite)?.app)?.slug) === GITHUB_ACTIONS_APP) {
+      actionsRuns += 1;
+      if (conclusion === "SKIPPED") actionsSkipped += 1;
+    }
     if ((status && status !== "COMPLETED") || conclusion === "PENDING" || conclusion === "EXPECTED") {
       pending += 1;
       if (required) requiredPending += 1;
@@ -210,6 +222,7 @@ function checkSummary(nodes: unknown[], requiredContexts: Set<string>): GithubPr
     requiredFailed,
     failingNames,
     requiredFailingNames,
+    ciNotRun: actionsRuns > 0 && actionsSkipped === actionsRuns,
   };
 }
 
@@ -284,7 +297,7 @@ const BATCH_CONCURRENCY = 3;
 // A lock whose process is gone is stale at once. This bounds one whose process id was reused.
 const LOCK_STALE_MS = 5 * 60_000;
 const LOCK_WAIT_MS = 30_000;
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 const CACHE_DIR =
   process.env.PASEO_GRAPHITE_CACHE_DIR || join(tmpdir(), `paseo-graphite-${process.getuid?.() ?? "user"}`);
 

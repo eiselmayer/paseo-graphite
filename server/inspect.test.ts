@@ -52,6 +52,7 @@ const readyPr: GithubPr = {
     requiredFailed: 0,
     failingNames: [],
     requiredFailingNames: [],
+    ciNotRun: false,
   },
   updatedAt: "2026-09-23T00:00:00Z",
 };
